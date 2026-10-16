@@ -9,18 +9,32 @@ st.set_page_config(page_title="Chat with your notes", page_icon="📚")
 st.title("📚 Chat with your notes")
 st.caption("Paste class notes, then ask questions. Gemini answers using the notes you provide.")
 
-server_api_key = os.getenv("GEMINI_API_KEY", "")
-user_api_key = st.sidebar.text_input(
-    "Gemini API key",
-    value="",
-    type="password",
-    help="Enter your own key if the app owner has not configured one. It is not saved to the project files.",
-)
-api_key = user_api_key or server_api_key
-if server_api_key:
-    st.sidebar.caption("A server-managed key is configured. Requests share its quota.")
+api_key = os.getenv("GEMINI_API_KEY", "").strip()
 model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-st.sidebar.caption(f"Model: {model}")
+fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
+
+
+def generate_with_fallback(client, prompt):
+    models = list(dict.fromkeys([model, fallback_model]))
+    for index, candidate in enumerate(models):
+        try:
+            return client.models.generate_content(model=candidate, contents=prompt)
+        except Exception as exc:
+            error = str(exc).upper()
+            transient_overload = any(code in error for code in ("429", "500", "502", "503", "504", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
+            if not transient_overload or index == len(models) - 1:
+                raise
+            st.info(f"{candidate} is temporarily unavailable. Trying {models[index + 1]}…")
+
+
+def generation_error(exc):
+    error = str(exc).upper()
+    if any(code in error for code in ("503", "UNAVAILABLE", "500", "502", "504")):
+        return "Gemini is temporarily busy on the available models. Please wait a moment and try again."
+    if "429" in error or "RESOURCE_EXHAUSTED" in error:
+        return "The Gemini request limit has been reached. Please try again later."
+    return str(exc)
+
 
 notes = st.text_area("Your notes", height=240, placeholder="Paste a lesson, chapter, or your own notes here…")
 if not notes.strip():
@@ -65,13 +79,13 @@ Student's question: {question}
     with st.chat_message("assistant"):
         try:
             if not api_key:
-                raise ValueError("Enter a Gemini API key in the sidebar first.")
+                raise ValueError("Gemini is not configured for this app. Please contact the app owner.")
             with st.spinner("Thinking…"):
                 client = genai.Client(api_key=api_key)
-                response = client.models.generate_content(model=model, contents=prompt)
+                response = generate_with_fallback(client, prompt)
             answer = (response.text or "The model returned an empty response.").strip()
             st.markdown(answer)
             st.session_state.history.append({"role": "assistant", "content": answer})
         except Exception as exc:
             st.session_state.history.pop()
-            st.error(f"Could not generate an answer: {exc}")
+            st.error(f"Could not generate an answer: {generation_error(exc)}")
